@@ -1,0 +1,133 @@
+---
+title: "코사인 유사도를 사용하여 일치하는 문서 찾기: 세네카의 친구 루킬리우스에게 보낸 편지를 이용한 튜토리얼"
+output: html_notebook
+---
+
+최근에 나는 문서를 클러스터링하고, 내용에 따라 유사한 문서를 찾는 것에 관심을 가지게 되었다. 이 블로그 게시물에서는 세네카의 '루킬리우스에게 보내는 도덕적 편지들'을 사용하여 그의 124개의 편지들 간의 페어와이즈 코사인 유사도를 계산할 것이다. 두 벡터 간의 코사인 유사도를 계산하면 이 벡터들이 얼마나 유사한지 알 수 있다. 코사인 유사도가 1이라는 것은 두 벡터 사이의 각도가 0이며, 따라서 두 벡터가 같은 방향을 가지고 있다는 것을 의미한다. 세네카의 '루킬리우스에게 보내는 도덕적 편지들'은 주로 철학적 주제를 다루고 있으며, 세네카는 여러 역할 중에서도 스토아 학파 철학자였다. 스토아 학파 철학은 매우 흥미롭지만, 특히 현대에는 종종 오해를 받았다. 현대에는 이 학파에 대한 새로운 관심이 생겨나고 있다. 이에 대해서는 현대 스토아주의를 참조하라.
+
+첫 번째 단계는 편지들을 스크래핑하는 것이다. 아래 코드는 편지들을 스크래핑하여 리스트에 저장한다. 먼저 raw 텍스트를 가져오는 함수를 작성한다. html_nodes() 함수의 xpath 인수를 주목하라. 이 복잡한 표현은 구글 크롬의 SelectorGadget 확장을 사용하여 얻었으며, 그런 다음 웹 페이지의 올바른 요소를 선택하였다. 내 설명이 명확하지 않은 경우 이 스크린샷을 참조하라.
+
+그 다음 extract_text() 함수는 편지에서 텍스트를 추출한다. 약간 복잡할 수 있는 유일한 줄은 discard(~==(., ""))로, 이 줄은 모든 빈 줄을 제거한다.
+
+마지막으로 get_letter() 함수는 앞의 두 함수를 호출하여 실제로 편지를 가져오는 함수이다. 마지막 줄에서는 URL 목록을 get_letter() 함수에 매핑하여 모든 편지를 리스트에 가져온다.
+
+```{r}
+library(tidyverse)
+library(rvest)
+
+base_url <- "https://en.wikisource.org/wiki/Moral_letters_to_Lucilius/Letter_"
+
+letter_numbers <- seq(1, 124)
+
+letter_urls <- paste0(base_url, letter_numbers)
+
+get_raw_text <- function(base_url, letter_number){
+  paste0(base_url, letter_number) %>%
+    read_html() %>%
+    html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "mw-parser-output", " " ))]') %>%  
+    html_text()
+}
+
+
+extract_text <- function(raw_text, letter_number){
+  raw_text <- raw_text %>%
+    str_split("\n") %>%  
+    flatten_chr() %>%  
+    discard(~`==`(., ""))
+
+  start <- 5
+
+  end <- str_which(raw_text, "Footnotes*")
+
+  raw_text[start:(end-1)] %>%
+    str_remove_all("\\[\\d{1,}\\]") %>%
+    str_remove_all("\\[edit\\]")
+}
+
+get_letter <- function(base_url, letter_number){
+
+  raw_text <- get_raw_text(base_url, letter_number)
+
+  extract_text(raw_text, letter_number)
+}
+
+letters_to_lucilius <- map2(base_url, letter_numbers, get_letter)
+```
+
+이제 편지들이 리스트에 저장되었으니, 텍스트를 조금 더 처리해야 합니다. 편지들 간의 코사인 유사도를 계산하려면, 이를 벡터로 표현할 방법이 필요합니다. 이를 위해 여러 가지 방법이 있지만, 나는 각 편지의 tf-idf를 계산할 것입니다. tf-idf는 각 편지에 대해 0과 0이 아닌 값을 가지는 벡터를 제공해줍니다. 0 값은 모든 편지에 공통적으로 나타나는 단어를 나타내며, 예측력을 가지지 않습니다. 0이 아닌 값은 모든 편지에 나타나지 않고 일부에만 나타나는 단어를 나타냅니다. 예를 들어, 죽음을 논하는 편지에는 '죽음'이라는 단어가 포함되고, 죽음을 논하지 않는 편지에는 이 단어가 포함되지 않을 것입니다. 따라서 '죽음'이라는 단어는 예측력을 가지며, 이는 죽음을 논하는 편지와 그렇지 않은 편지를 구분하는 데 도움을 줍니다. 같은 논리를 어떤 주제에도 적용할 수 있습니다.
+
+따라서 각 편지의 tf-idf를 얻기 위해 먼저 이를 정돈된 데이터셋에 넣어야 합니다. 나는 이를 위해 {tidytext} 패키지를 사용할 것입니다. 먼저 필요한 패키지를 로드하고, 각 편지를 텍스트를 포함하는 하나의 열로 된 데이터프레임으로 변환한 다음, 편지의 제목을 또 다른 리스트에 저장합니다.
+
+```{r}
+library(tidytext)
+library(SnowballC)
+library(stopwords)
+library(text2vec)
+
+letters_to_lucilius_df <- map(letters_to_lucilius, ~tibble("text" = .))
+
+letter_titles <- letters_to_lucilius_df %>%
+  map(~slice(., 1)) %>%
+  map(pull)
+```
+
+이제, 각 데이터프레임에 새로운 열인 제목(title)을 추가합니다.
+
+```{r}
+letters_to_lucilius_df <-  map2(.x = letters_to_lucilius_df, .y = letter_titles,
+                                ~mutate(.x, title = .y)) %>%
+  map(~slice(., -1))
+```
+
+이제 unnest_tokens()를 사용하여 데이터셋을 변환할 수 있습니다. 이전에는 편지의 전체 텍스트가 하나의 열에 있었습니다. unnest_tokens()를 사용한 후에는 단어마다 하나의 행을 가지는 데이터셋이 됩니다. 이렇게 하면 각 편지의 단어 빈도나 내가 관심 있는 각 편지의 tf-idf를 쉽게 계산할 수 있습니다.
+
+```{r}
+tokenized_letters <- letters_to_lucilius_df %>%
+  bind_rows() %>%
+  group_by(title) %>%
+  unnest_tokens(word, text)
+```
+
+이제 {stopwords} 패키지에 포함된 데이터를 사용하여 불용어를 제거할 수 있습니다.
+```{r}
+stopwords_en <- tibble("word" = stopwords("en", source  = "smart"))
+
+tokenized_letters <- tokenized_letters %>%
+  anti_join(stopwords_en) %>%
+  filter(!str_detect(word, "\\d{1,}"))
+## Joining, by = "word"
+```
+다음 단계는 단어 어간 추출입니다. 이는 "dogs"를 "dog"로, "was"를 "be"로 변환하는 것을 의미합니다. 단어 어간 추출을 하지 않으면 "dogs"와 "dog"는 서로 다른 단어로 간주되지만 실제로는 같은 단어입니다. wordStem()은 {SnowballC} 패키지의 함수입니다.
+```{r}
+tokenized_letters <- tokenized_letters %>%
+  mutate(word = wordStem(word, language = "en"))
+```
+
+마지막으로, 각 편지의 tf-idf를 계산하고 데이터를 희소 행렬로 변환할 수 있습니다.
+```{r}
+tfidf_letters <- tokenized_letters %>%
+  count(title, word, sort  = TRUE) %>%
+  bind_tf_idf(word, title, n)
+
+sparse_matrix <- tfidf_letters %>%
+  cast_sparse(title, word, tf)
+```
+
+이제 행렬을 들여다 봅시다.
+
+```{r}
+sparse_matrix[1:10, 1:4]
+```
+
+이 행렬의 각 행을 편지를 나타내는 벡터로 간주할 수 있으며, 따라서 편지들 간의 코사인 유사도를 계산할 수 있습니다. 이를 위해 {text2vec} 패키지의 sim2() 함수를 사용합니다. 그런 다음 특정 참조 편지에 대해 유사한 편지를 반환하는 get_similar_letters() 함수를 생성합니다.
+
+```{r}
+similarities <- sim2(sparse_matrix, method = "cosine", norm = "l2") 
+
+get_similar_letters <- function(similarities, reference_letter, n_recommendations = 3){
+  sort(similarities[reference_letter, ], decreasing = TRUE)[1:(2 + n_recommendations)]
+}
+get_similar_letters(similarities, 19)
+```
+
+이 예시들에서 볼 수 있듯이, 이는 꽤 잘 작동하는 것 같습니다. 첫 번째 제목은 참조 편지의 제목이며, 다음 세 개는 추천된 편지들입니다. 문제는 내 행렬이 올바른 순서가 아니라서 참조 편지 19가 세네카의 19번째 편지와 일치하지 않는다는 점입니다. 하지만 오늘은 그것을 수정하지 않을 것입니다.
